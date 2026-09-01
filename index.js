@@ -1,14 +1,19 @@
 const express = require('express');
 const app = express();
 
+// Parsing de JSON y datos de formularios
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Habilitar CORS para permitir peticiones desde OmniPOS
+// Permisos CORS globales (evita bloqueos 403 / preflight en Render)
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
-  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "*");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE");
+  
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
   next();
 });
 
@@ -23,7 +28,7 @@ const clientesDB = {
   }
 };
 
-// Ruta principal de bienvenida
+// Ruta principal para verificar que el servidor está online
 app.get('/', (req, res) => {
   res.send('<h1>Servidor de Licencias OmniPOS Activo 🚀</h1>');
 });
@@ -41,7 +46,7 @@ app.get('/api/validar-licencia/:clave', (req, res) => {
     });
   }
 
-  // Verificamos si la fecha de vencimiento expiró
+  // Verificación de expiración si está dada de alta
   if (cliente.fechaVencimiento) {
     const hoy = new Date();
     const vto = new Date(cliente.fechaVencimiento);
@@ -88,37 +93,51 @@ app.post('/api/alta-cliente', (req, res) => {
   });
 });
 
-// 3. Webhook de Mercado Pago (Recibe avisos de cobro y activa/extiende licencias)
+// 3. Webhook de Mercado Pago (Recibe avisos de suscripción/pago y activa la licencia)
 app.post('/api/webhook-mercadopago', (req, res) => {
-  const body = req.body;
-  console.log('Notificación Webhook MP recibida:', JSON.stringify(body));
-
-  // Responder 200 OK inmediatamente a Mercado Pago para confirmar recepción
+  // Responder 200 OK inmediatamente a Mercado Pago
   res.status(200).send('OK');
 
-  // Procesar evento de pago / suscripción
+  const body = req.body || {};
+  console.log('Notificación Webhook MP recibida:', JSON.stringify(body));
+
   try {
-    const clave = body.data?.external_reference || body.external_reference;
+    // Intentar obtener la clave (external_reference) desde distintas ubicaciones del evento
+    let clave = body.data?.external_reference || body.external_reference;
 
     if (clave && clientesDB[clave]) {
-      // Calcular 30 días a partir de hoy
-      const nuevaFecha = new Date();
-      nuevaFecha.setDate(nuevaFecha.getDate() + 30);
-      const fechaIso = nuevaFecha.toISOString().split('T')[0];
-
-      // Activar la licencia
-      clientesDB[clave].estado = 'ACTIVA';
-      clientesDB[clave].valida = true;
-      clientesDB[clave].fechaVencimiento = fechaIso;
-
-      console.log(`✅ [WEBHOOK] Licencia ${clave} activada/renovada exitosamente hasta ${fechaIso}`);
-    } else if (clave) {
-      console.log(`⚠️ [WEBHOOK] Se recibió un pago para la clave ${clave}, pero no existe en clientesDB.`);
+      activarLicencia(clave);
+    } else {
+      // Fallback: Si es un evento de suscripción (preapproval) y MP no mandó external_reference explícito,
+      // activamos la última licencia registrada que esté en estado PENDIENTE_PAGO
+      const pendientes = Object.keys(clientesDB).filter(k => clientesDB[k].estado === 'PENDIENTE_PAGO');
+      if (pendientes.length > 0) {
+        const claveAActivar = pendientes[pendientes.length - 1];
+        console.log(`[WEBHOOK] Notificación detectada. Activando clave pendiente: ${claveAActivar}`);
+        activarLicencia(claveAActivar);
+      } else {
+        console.log(`⚠️ [WEBHOOK] Notificación recibida sin external_reference directo ni licencias pendientes.`);
+      }
     }
   } catch (error) {
-    console.error('❌ Error procesando datos del Webhook:', error);
+    console.error('❌ Error procesando Webhook:', error);
   }
 });
+
+// Función auxiliar para extender la licencia 30 días
+function activarLicencia(clave) {
+  if (!clientesDB[clave]) return;
+
+  const nuevaFecha = new Date();
+  nuevaFecha.setDate(nuevaFecha.getDate() + 30);
+  const fechaIso = nuevaFecha.toISOString().split('T')[0];
+
+  clientesDB[clave].estado = 'ACTIVA';
+  clientesDB[clave].valida = true;
+  clientesDB[clave].fechaVencimiento = fechaIso;
+
+  console.log(`✅ [WEBHOOK] Licencia ${clave} activada exitosamente hasta ${fechaIso}`);
+}
 
 // Puerto dinámico asignado por Render
 const PORT = process.env.PORT || 10000;
