@@ -99,7 +99,6 @@ app.post('/api/webhook-mercadopago', (req, res) => {
   // Procesar evento de pago / suscripción
   try {
     const clave = body.data?.external_reference || body.external_reference;
-    const action = body.action || body.type;
 
     if (clave && clientesDB[clave]) {
       // Calcular 30 días a partir de hoy
@@ -126,8 +125,3 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`Servidor de Licencias OmniPOS corriendo en el puerto ${PORT}`);
 });
-  res.json({ ok: true, mensaje: "Cliente registrado con exito", data: clientesDB[claveUpper] });
-});
-
-const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => console.log(`Servidor de Licencias OmniPOS corriendo en el puerto ${PORT}`));
