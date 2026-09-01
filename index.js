@@ -2,100 +2,130 @@ const express = require('express');
 const app = express();
 
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// Base de datos persistente (Podés usar MongoDB o un archivo base.json)
-// Ejemplo de estructura en memoria / JSON:
-let clientesDB = {
-  "LIC-ALMACEN-JOSE-88": {
-    cliente: "Almacén de José",
+// Habilitar CORS para permitir peticiones desde OmniPOS
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  next();
+});
+
+// Base de datos temporal en memoria (clientesDB)
+const clientesDB = {
+  "LIC-DEMO-01": {
+    cliente: "Comercio Demo",
     estado: "ACTIVA",
+    valida: true,
     tipo: "SUSCRIPCION",
-    fechaVencimiento: "2026-10-01",
-    preapprovalId: null
+    fechaVencimiento: "2026-12-31"
   }
 };
 
-// ==========================================
-// 1. ENDPOINT DE VALIDACIÓN (OmniPOS lo consulta al iniciar)
-// ==========================================
-app.get('/api/validar-licencia/:clave', (req, res) => {
-  const clave = req.params.clave.toUpperCase();
-  const licencia = clientesDB[clave];
-
-  if (!licencia) {
-    return res.json({ ok: false, activa: false, motivo: "LICENCIA_NO_EXISTE" });
-  }
-
-  const hoy = new Date().toISOString().split('T')[0];
-  const estaAlDia = licencia.estado === 'ACTIVA' && licencia.fechaVencimiento >= hoy;
-
-  return res.json({
-    ok: true,
-    activa: estaAlDia,
-    estado: licencia.estado,
-    fechaVencimiento: licencia.fechaVencimiento,
-    cliente: licencia.cliente,
-    tipo: licencia.tipo
-  });
+// Ruta principal de bienvenida
+app.get('/', (req, res) => {
+  res.send('<h1>Servidor de Licencias OmniPOS Activo 🚀</h1>');
 });
 
-// ==========================================
-// 2. WEBHOOK AUTOMÁTICO DE MERCADO PAGO
-// ==========================================
-app.post('/api/webhook-mercadopago', (req, res) => {
-  const body = req.body;
+// 1. Endpoint para validar licencias desde OmniPOS
+app.get('/api/validar-licencia/:clave', (req, res) => {
+  const clave = req.params.clave ? req.params.clave.toUpperCase() : '';
+  const cliente = clientesDB[clave];
 
-  // Imprimimos en consola la notificación entrante de Mercado Pago
-  console.log("Notificación MP recibida:", JSON.stringify(body, null, 2));
+  if (!cliente) {
+    return res.status(404).json({
+      valida: false,
+      estado: 'INEXISTENTE',
+      mensaje: 'La clave ingresada no existe.'
+    });
+  }
 
-  // A. Si se creó o cobró una suscripción
-  if (body.type === 'payment' || body.action === 'payment.created') {
-    const externalReference = body.data?.external_reference || body.external_reference;
-    const status = body.data?.status || body.status;
-
-    if (externalReference && status === 'approved') {
-      const clave = externalReference.toUpperCase();
-
-      if (clientesDB[clave]) {
-        // Extendemos 30 días más la vigencia de la licencia
-        const fechaActual = new Date();
-        fechaActual.setDate(fechaActual.getDate() + 30);
-
-        clientesDB[clave].fechaVencimiento = fechaActual.toISOString().split('T')[0];
-        clientesDB[clave].estado = 'ACTIVA';
-
-        console.log(`✅ ¡Pago Aprobado! Licencia ${clave} extendida hasta ${clientesDB[clave].fechaVencimiento}`);
-      }
+  // Verificamos si la fecha de vencimiento expiró
+  if (cliente.fechaVencimiento) {
+    const hoy = new Date();
+    const vto = new Date(cliente.fechaVencimiento);
+    
+    if (hoy > vto && cliente.estado === 'ACTIVA') {
+      cliente.estado = 'VENCIDA';
+      cliente.valida = false;
     }
   }
 
-  // Mercado Pago exige responder con un status HTTP 200 OK
-  res.sendStatus(200);
+  res.json({
+    clave: clave,
+    valida: cliente.estado === 'ACTIVA',
+    estado: cliente.estado,
+    cliente: cliente.cliente,
+    vencimiento: cliente.fechaVencimiento
+  });
 });
 
-// ==========================================
-// 3. REGISTRO MANUAL DE CLIENTE NUEVO (ADMIN)
-// ==========================================
+// 2. Endpoint Admin para dar de alta licencias (Estado inicial: PENDIENTE_PAGO)
 app.post('/api/alta-cliente', (req, res) => {
-  const { clave, cliente, tipo } = req.body;
+  const { clave, cliente } = req.body;
 
-  if (!clave || !cliente) {
-    return res.status(400).json({ ok: false, error: "Faltan datos obligatorios." });
+  if (!clave) {
+    return res.status(400).json({ ok: false, error: "El campo 'clave' es obligatorio." });
   }
 
   const claveUpper = clave.toUpperCase();
-  
-  // Asignamos 14 días iniciales de prueba por defecto
-  const fechaVto = new Date();
-  fechaVto.setDate(fechaVto.getDate() + 14);
 
   clientesDB[claveUpper] = {
-    cliente,
-    estado: 'ACTIVA',
-    tipo: tipo || 'SUSCRIPCION',
-    fechaVencimiento: fechaVto.toISOString().split('T')[0]
+    cliente: cliente || "Nuevo Cliente",
+    estado: 'PENDIENTE_PAGO',
+    valida: false,
+    tipo: 'SUSCRIPCION',
+    fechaVencimiento: null
   };
 
+  console.log(`[ADMIN] Licencia creada: ${claveUpper} (${clientesDB[claveUpper].cliente}) - Estado: PENDIENTE_PAGO`);
+
+  res.json({
+    ok: true,
+    mensaje: `Licencia ${claveUpper} creada con éxito en estado PENDIENTE_PAGO.`,
+    licencia: clientesDB[claveUpper]
+  });
+});
+
+// 3. Webhook de Mercado Pago (Recibe avisos de cobro y activa/extiende licencias)
+app.post('/api/webhook-mercadopago', (req, res) => {
+  const body = req.body;
+  console.log('Notificación Webhook MP recibida:', JSON.stringify(body));
+
+  // Responder 200 OK inmediatamente a Mercado Pago para confirmar recepción
+  res.status(200).send('OK');
+
+  // Procesar evento de pago / suscripción
+  try {
+    const clave = body.data?.external_reference || body.external_reference;
+    const action = body.action || body.type;
+
+    if (clave && clientesDB[clave]) {
+      // Calcular 30 días a partir de hoy
+      const nuevaFecha = new Date();
+      nuevaFecha.setDate(nuevaFecha.getDate() + 30);
+      const fechaIso = nuevaFecha.toISOString().split('T')[0];
+
+      // Activar la licencia
+      clientesDB[clave].estado = 'ACTIVA';
+      clientesDB[clave].valida = true;
+      clientesDB[clave].fechaVencimiento = fechaIso;
+
+      console.log(`✅ [WEBHOOK] Licencia ${clave} activada/renovada exitosamente hasta ${fechaIso}`);
+    } else if (clave) {
+      console.log(`⚠️ [WEBHOOK] Se recibió un pago para la clave ${clave}, pero no existe en clientesDB.`);
+    }
+  } catch (error) {
+    console.error('❌ Error procesando datos del Webhook:', error);
+  }
+});
+
+// Puerto dinámico asignado por Render
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`Servidor de Licencias OmniPOS corriendo en el puerto ${PORT}`);
+});
   res.json({ ok: true, mensaje: "Cliente registrado con exito", data: clientesDB[claveUpper] });
 });
 
